@@ -16,8 +16,6 @@ thetapos = nr + nV + nq + nomegaB
 nstates = nr + nV + nq + nomegaB + ntheta + nvtheta
 
 dt = 0.02
-f = 1 / dt
-n_pathpoints = round(10 * f)
 steepness = 1
 
 # drone data
@@ -194,6 +192,7 @@ def MPCC_sim(horizon, sim_length, x0):
         # print('x:', np.array2string(sol.value(X[:, :]), separator=", "))
         # print('u:', np.array2string(sol.value(U[:, :]), separator=", "))
         N = 1
+
         print('x0:', x0)
         print('x0 in opti:', sol.value(X[:, 0]))
         x0 = dynamics(x0, torque_scaling(sol.value(U)[:, 0, None]))
