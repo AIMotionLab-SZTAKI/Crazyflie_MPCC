@@ -1,31 +1,60 @@
 import numpy as np
-import quaternion
 import casadi as cs
 import liecasadi as liecs
+from MPCC_with_maps import dynamics
 
 
 
-def qqmult(q1, q2):
-    """multiply two quaternions or a quaternion and a vector"""
-    M = q1.shape[1]
-    a = liecs.SO3(q1[:, 0])
-    b = liecs.SO3(q2[:, 0])
-    q3 = (a * b).xyzw
-    for i in range(1, M):
-        a = liecs.SO3(q1[:, i])
-        b = liecs.SO3(q2[:, i])
-        q3 = cs.horzcat(q3, (a * b).xyzw)
-    return q3
 J = cs.DM(np.array([[3, 0, 0], [0, 2, 0], [0, 0, 1]]))
 a = cs.MX.sym('a', 3)
 v1 = cs.DM(np.array([[1, 10, 1, 10], [2, 20, 2, 20], [3, 30, 3, 30]])).T
 v2 = cs.DM(np.array([[1, 1, 1], [1, 1, 1], [1, 1, 1]]))
 v3 = cs.DM(np.array([1, 2, 3, 4]))
-
+gyokketto = np.sqrt(2)
 q = cs.MX.sym('q', 4, 1)
 v = cs.MX.sym('v', 3, 1)
 
 f = cs.Function('f', [q, v], [liecs.SO3(q).act(v)])
 g = f.map(3)
-print(g(v1, v2))
+
+J = cs.diag([1.4e-5, 1.4e-5, 2.17e-5])
+J_inv = cs.diag([1/1.4e-5, 1/1.4e-5, 1/2.17e-5])
+u = cs.DM([[1], [-0.24378298/200], [0.04773571/200], [0.59525322/200]])
+omega = cs.DM([[0], [0], [0]])
+def der(tau, omega):
+    omegaBdot = J_inv @ (tau[1:] - cs.cross(omega, cs.mtimes(J, omega)))
+    return omegaBdot
+
+r0 = np.array([1, 0, 0])
+v0 = np.array([0, gyokketto/2, gyokketto/2])
+q0 = np.array([-0.3826834324, 0, 0, 0.9238795325])
+omegaB0 = np.array([0, 0, 0])
+x0 = cs.DM(cs.vertcat(r0, v0, q0, omegaB0, 0))
+
+u = np.array([[5.0207591611609175e-06], [-0.8065217107973697], [-1.3450114589325268], [2.169850499315401]])
+x0 = np.array([[0.9999999151136898], [0.042426512380644925], [0.024774581429671316],[-5.126342439930953e-06], [0.7071100943676513], [0.11871198934274663], [-0.20975236746069792], [-0.7959460305881096], [0.1125444753709605], [0.5566036307814921], [-0.10507416368934219], [-59.98494593591962], [20.062102163283132], [0.047511926160426814]])
+
+control = dynamics(x0, u)
+0.9999999988171033
+0.014142161423363634
+0.012180830463263638
+-2.415311683713044e-07
+0.7071093858427471
+0.5109762193256931
+-0.42804520011692027
+-0.052035305745572136
+0.1295033372818031
+0.8928875460464717
+-10.080058483045118
+-19.99992531945695
+19.998622113506
+0.01861286621777216
+
+k1 = der(u, omega)
+k2 = der(u, omega + k1 * 0.02 / 2)
+k3 = der(u, omega + k2 * 0.02 / 2)
+k4 = der(u, omega + k3 * 0.02)
+print(k1, k2, k3, k4)
+print((k1 + k2*2 + k3 * 2 + k4) * 0.02 / 6)
+print(control)
 #print(np.cross([10, 20, 30], [11, 21, 31]))

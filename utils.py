@@ -34,7 +34,7 @@ class Quaternion:
 
     def normalized(self):
         """normalize the quaternion"""
-        return Quaternion(wxyz=self.wxyz/self.norm)
+        return Quaternion(wxyz=self.wxyz @ cs.diag(1/self.norm))
 
     def from_force(self, force, loc=3, depth=1):
         """quaternion from a force aligned with one of the axes"""
