@@ -46,7 +46,7 @@ direction_func = cs.Function('direction_func', [distance], [cs.vertcat(-cs.sin(d
                                                                            steepness) / length_height_factor])
 
 
-def torque_scaling(u, torque_scaling_xx = 1,  torque_scaling_yy = 1, torque_scaling_zz = 1, descaling=False):
+def torque_scaling(u, torque_scaling_xx = 100,  torque_scaling_yy = 100, torque_scaling_zz = 100, descaling=False):
     """Scales or descales the 4 inputs, the thrust stays unscaled"""
     if descaling:
         return np.diag([1, torque_scaling_xx, torque_scaling_yy, torque_scaling_zz]) * u
@@ -138,6 +138,8 @@ def MPCC_sim(horizon, sim_length, x0):
     X = opti.variable(nstates, N+1)
     U = opti.variable(4, N)
     U_scaled = torque_scaling(U)
+    X0 = opti.parameter(nstates, 1)
+    opti.set_value(X0, x0)
 
     path_direction = cs.MX(3, N+1)
     path_direction[0, :] = -cs.sin(X[thetapos, :] / length_height_factor) / length_height_factor
@@ -147,23 +149,23 @@ def MPCC_sim(horizon, sim_length, x0):
 
     path_position = cs.MX(3, N+1)
     path_position[0, :] = cs.cos(X[thetapos, :] / length_height_factor)
-    path_position[1, :] = cs.sin(X[thetapos, :])
+    path_position[1, :] = cs.sin(X[thetapos, :] / length_height_factor)
     path_position[2, :] = steepness * X[thetapos, :] / length_height_factor
 
     # dynamics constraints
-    opti.subject_to(X[:, 0] == x0)
+    opti.subject_to(X[:, 0] == X0)
     opti.subject_to(X[:, 1:] == dynamics(X[:, 0:-1], U_scaled))
     opti.subject_to(opti.bounded(-20, cs.vec(X[10:13, :]), 20))
 
     # input constraint
     #opti.subject_to(opti.bounded(0, cs.vec(U[0, :])), 3)
     opti.subject_to(opti.bounded(0, cs.vec(U[0, :]), 4))
-    opti.subject_to(opti.bounded(-6, cs.vec(U[1:, :]), 6))
+    opti.subject_to(opti.bounded(-2, cs.vec(U[1:, :]), 2))
 
     # cost function weights
     qc = cs.DM.ones((1, N))
     ql = cs.DM_eye(N)
-    nu = 0.001 * cs.DM.ones(N)
+    nu = 0.001 * cs.DM.ones(N).T
 
     # error vector
     err = X[0:nr, 1:] - path_position[:, 1:]
@@ -178,14 +180,14 @@ def MPCC_sim(horizon, sim_length, x0):
     vtheta = cs.sum1(X[nr:nr+nV, 1:] * path_direction[:, 1:])
 
     # cost function
-    opti.minimize(err_lag @ ql @ err_lag.T + cs.dot(cs.sum1(err_con ** 2), qc) )
+    opti.minimize(err_lag @ ql @ err_lag.T + cs.dot(cs.sum1(err_con ** 2), qc) - cs.dot(vtheta, nu))
 
     ulist = np.array([[], [], [], []])
     poslist = np.array([[], [], []])
     for i in range(sim_length):
 
         # calling the solver
-        p_opts = {"expand": True}
+        p_opts = {"expand": False}
         s_opts = {"max_iter": 3000}
         opti.solver("ipopt", p_opts, s_opts)
         sol = opti.solve()
@@ -206,6 +208,7 @@ def MPCC_sim(horizon, sim_length, x0):
         X_initial = np.append(X_initial, X_initial[:, -1, None], axis=1)
         X_initial[nr+nV:nr+nV+nq] = Quaternion(X_initial[nr+nV:nr+nV+nq]).normalized().wxyz
         opti.set_initial(X[:, 1:], cs.DM(X_initial))
+        opti.set_initial(X[:, 0], x0)
 
         if i == 100:
             pass
@@ -216,7 +219,7 @@ def MPCC_sim(horizon, sim_length, x0):
         opti.set_initial(U, U_initial)
         ulist = np.append(ulist, torque_scaling(sol.value(U[:, :]))[:, 0, None], axis=1)
         poslist = np.append(poslist, x0[0:3, 0], axis=1)
-        X[:, 0] = x0
+        opti.set_value(X0, x0)
         print(x0)
         print(sol.value(U)[:, 0, None])
         # print("X_initial:", X_initial)
