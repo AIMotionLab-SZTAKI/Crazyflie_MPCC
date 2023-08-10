@@ -3,6 +3,7 @@ import numpy as np
 import casadi as cs
 import liecasadi
 from utils import Quaternion, RotationQuaternion, create_vector_from_force
+from path import path_direction_func, path_position_func
 
 N = 1
 nr = 3
@@ -46,7 +47,7 @@ direction_func = cs.Function('direction_func', [distance], [cs.vertcat(-cs.sin(d
                                                                            steepness) / length_height_factor])
 
 
-def torque_scaling(u, torque_scaling_xx = 100,  torque_scaling_yy = 100, torque_scaling_zz = 100, descaling=False):
+def torque_scaling(u, torque_scaling_xx = 200,  torque_scaling_yy = 200, torque_scaling_zz = 200, descaling=False):
     """Scales or descales the 4 inputs, the thrust stays unscaled"""
     if descaling:
         return np.diag([1, torque_scaling_xx, torque_scaling_yy, torque_scaling_zz]) * u
@@ -145,27 +146,27 @@ def MPCC_sim(horizon, sim_length, x0):
     path_direction[0, :] = -cs.sin(X[thetapos, :] / length_height_factor) / length_height_factor
     path_direction[1, :] = cs.cos(X[thetapos, :]) / length_height_factor
     path_direction[2, :] = steepness / length_height_factor
-    path_direction = direction_func.map(N+1)(X[thetapos, :])
+    path_direction = path_direction_func.map(N+1)(X[thetapos, :])
 
     path_position = cs.MX(3, N+1)
     path_position[0, :] = cs.cos(X[thetapos, :] / length_height_factor)
     path_position[1, :] = cs.sin(X[thetapos, :] / length_height_factor)
     path_position[2, :] = steepness * X[thetapos, :] / length_height_factor
-
+    path_position = path_position_func.map(N+1)(X[thetapos, :])
     # dynamics constraints
     opti.subject_to(X[:, 0] == X0)
     opti.subject_to(X[:, 1:] == dynamics(X[:, 0:-1], U_scaled))
-    opti.subject_to(opti.bounded(-20, cs.vec(X[10:13, :]), 20))
+    # opti.subject_to(opti.bounded(-20, cs.vec(X[10:13, :]), 20))
 
     # input constraint
     #opti.subject_to(opti.bounded(0, cs.vec(U[0, :])), 3)
     opti.subject_to(opti.bounded(0, cs.vec(U[0, :]), 4))
-    opti.subject_to(opti.bounded(-2, cs.vec(U[1:, :]), 2))
+    opti.subject_to(opti.bounded(-3, cs.vec(U[1:, :]), 3))
 
     # cost function weights
-    qc = cs.DM.ones((1, N))
-    ql = cs.DM_eye(N)
-    nu = 0.001 * cs.DM.ones(N).T
+    qc = 0.5*cs.DM.ones((1, N))
+    ql = 2*cs.DM_eye(N)
+    nu = 0.01 * cs.DM.ones(N).T
 
     # error vector
     err = X[0:nr, 1:] - path_position[:, 1:]
@@ -187,20 +188,20 @@ def MPCC_sim(horizon, sim_length, x0):
     for i in range(sim_length):
 
         # calling the solver
-        p_opts = {"expand": False}
-        s_opts = {"max_iter": 3000}
+        p_opts = {"expand": True}
+        s_opts = {"max_iter": 3000, "print_level": 5}
         opti.solver("ipopt", p_opts, s_opts)
         sol = opti.solve()
         # print('x:', np.array2string(sol.value(X[:, :]), separator=", "))
         # print('u:', np.array2string(sol.value(U[:, :]), separator=", "))
         N = 1
 
-        print('x0:', x0)
-        print('x0 in opti:', sol.value(X[:, 0]))
+        # print('x0:', x0)
+        # print('x0 in opti:', sol.value(X[:, 0]))
         x0 = dynamics(x0, torque_scaling(sol.value(U)[:, 0, None]))
         x0[nr+nV:nr+nV+nq] = Quaternion(x0[nr+nV:nr+nV+nq]).normalized().wxyz
-        print('x1 given by the dynamics', x0)
-        print('x1 in sol.value(X):', sol.value(X[:, 1]))
+        # print('x1 given by the dynamics', x0)
+        # print('x1 in sol.value(X):', sol.value(X[:, 1]))
         N = horizon
 
         # set initial X guess
@@ -210,9 +211,6 @@ def MPCC_sim(horizon, sim_length, x0):
         opti.set_initial(X[:, 1:], cs.DM(X_initial))
         opti.set_initial(X[:, 0], x0)
 
-        if i == 100:
-            pass
-
         # set initial U guess
         U_initial = np.array(sol.value(U[:, 1:]))
         U_initial = np.append(U_initial, U_initial[:, -1, None], axis=1)
@@ -220,9 +218,9 @@ def MPCC_sim(horizon, sim_length, x0):
         ulist = np.append(ulist, torque_scaling(sol.value(U[:, :]))[:, 0, None], axis=1)
         poslist = np.append(poslist, x0[0:3, 0], axis=1)
         opti.set_value(X0, x0)
-        print(x0)
-        print(sol.value(U)[:, 0, None])
-        # print("X_initial:", X_initial)
+        # print(x0)
+        print("theta:", sol.value(X)[-1, 0, None])
+        print("z:", sol.value(X)[2, 0, None]*np.sqrt(2))
         # print("U_initial:", U_initial)
     return ulist, poslist
 

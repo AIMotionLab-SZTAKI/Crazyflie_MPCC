@@ -13,6 +13,6 @@ path_direction_func = cs.Function('direction_func', [distance], [cs.vertcat(-cs.
                                                                             cs.cos(distance / length_height_factor),
                                                                             steepness) / length_height_factor])
 
-path_postion_func = cs.Function('position_func', [distance], [cs.vertcat(cs.cos(distance / length_height_factor),
+path_position_func = cs.Function('position_func', [distance], [cs.vertcat(cs.cos(distance / length_height_factor),
                                                                          cs.sin(distance / length_height_factor),
                                                                          steepness * distance / length_height_factor)])
