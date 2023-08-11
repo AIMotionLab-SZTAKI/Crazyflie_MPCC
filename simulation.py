@@ -128,7 +128,7 @@ if __name__=="__main__":
     xlist = [x0]
     # Rotate the axes and update
     for i in range(sim_length):
-        xlist.append(MPCC.dynamics_single(xlist[-1], ulist[:, i, None], 0.02))
+        xlist.append(dynamics(xlist[-1], ulist[:, i, None]))
 
     ani = animation.FuncAnimation(fig, draw_drone, frames=xlist, interval=50, repeat=True, init_func=draw_bg())
     print(np.array2string(np.array(ulist), separator=", ", max_line_width=120))

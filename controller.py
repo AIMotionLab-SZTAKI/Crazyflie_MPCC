@@ -61,7 +61,7 @@ class MPCC:
 
         # dynamics constraints
         self.opti.subject_to(self.X[:, 0] == self.X0)
-        self.opti.subject_to(self.X[:, 1:] == self.dynamics_mulitple(self.X[:, 0:-1], self.U_scaled))
+        self.opti.subject_to(self.X[:, 1:] == self.dynamics_mulitple(self.X[:, 0:-1], self.U_scaled, self.V))
         self.opti.subject_to(self.opti.bounded(-20, cs.vec(self.X[10:13, :]), 20))
 
         # input constraints
@@ -75,7 +75,7 @@ class MPCC:
         # cost function weights
         qc = 0.5 * cs.DM.ones((1, self.horizon))
         ql = 2 * cs.DM_eye(self.horizon)
-        nu = 0.01 * cs.DM.ones(self.horizon).T
+        nu = 0.001 * cs.DM.ones(self.horizon).T
 
         path_position = path_position_func.map(self.horizon+1)(self.X[pos_theta, :])
 
@@ -90,13 +90,8 @@ class MPCC:
         # contouring error vector
         err_con = err - path_direction[:, 1:] @ cs.diag(cs.sum1(err * path_direction[:, 1:]))
 
-        # path speed
-        vtheta = cs.sum1(self.X[pos_V:pos_q, 1:] * path_direction[:, 1:])
-
         # cost function
-        return err_lag @ ql @ err_lag.T + cs.dot(cs.sum1(err_con ** 2), qc) - cs.dot(vtheta, nu)
-
-
+        return err_lag @ ql @ err_lag.T + cs.dot(cs.sum1(err_con ** 2), qc) - cs.dot(self.V, nu)
 
     def _initalize_solver(self, max_iter=3000) -> None:
         """ initializes the solver, max_iter and expand are set"""
@@ -119,9 +114,8 @@ class MPCC:
         V_func = cs.Function('V_func', [quaternion, vector], [liecasadi.SO3(quaternion).act(vector)])
 
         Vdot = (V_func.map(self.horizon)(x[pos_q:pos_omegab, :],
-                                         cs.repmat(cs.DM([[0], [0], [1]]), 1, self.horizon)) @ cs.diag(
-            u[0, :] / mass)) \
-               - create_vector_from_force(np.ones((1, self.horizon)) * gravitational_accel, depth=self.horizon)
+                                         cs.repmat(cs.DM([[0], [0], [1]]), 1, self.horizon)) @ cs.diag(u[0, :] / mass)) \
+                    - create_vector_from_force(np.ones((1, self.horizon)) * gravitational_accel, depth=self.horizon)
 
         q_func = cs.Function('q_func', [vector, quaternion],
                              [liecasadi.SO3(quaternion).quaternion_derivative(vector, omega_in_body_fixed=True)])
@@ -129,12 +123,10 @@ class MPCC:
 
         omegaBdot = J_inv @ (u[1:4, :] - cs.cross(x[pos_omegab:pos_theta, :],
                                                   cs.mtimes(J, x[pos_omegab:pos_theta, :])))
+        placeholder = cs.DM.zeros((1, self.horizon))
+        return cs.vertcat(rdot, Vdot, qdot, omegaBdot, placeholder)
 
-        thetadot = cs.sum1(x[pos_V:pos_q, :] * path_direction_func.map(self.horizon)(x[pos_theta, :]))
-
-        return cs.vertcat(rdot, Vdot, qdot, omegaBdot, thetadot)
-
-    def dynamics_mulitple(self, x: cs.MX, u: cs.MX) -> cs.MX:
+    def dynamics_mulitple(self, x: cs.MX, u: cs.MX, v:cs.MX) -> cs.MX:
         """ rk4 step for the dynamics, x is the state, u is the rotor rpm input"""
         k1 = self.derivative_multiple(x, u)
         k2 = self.derivative_multiple(x + (k1 * 0.5 * self.dt), u)
@@ -142,10 +134,11 @@ class MPCC:
         k4 = self.derivative_multiple(x + k3 * self.dt, u)
 
         x_next = x + (k1 + k2 * 2 + k3 * 2 + k4) * self.dt / 6
+        x_next[pos_theta, :] = x[pos_theta, :] + v * self.dt
 
         return x_next
 
-    def optimization_step(self, x0, prev_X=None, prev_U=None, U_is_initial=False) -> (np.ndarray, np.ndarray):
+    def optimization_step(self, x0, prev_X=None, prev_U=None, prev_V=None, U_is_initial=False) -> (np.ndarray, np.ndarray):
         """
             performs one optimization step, with
         :arg:
@@ -173,6 +166,12 @@ class MPCC:
             self.opti.set_initial(self.X[:, 1:], X_initial)
         self.opti.set_initial(self.X[:, 0], x0)
         self.opti.set_value(self.X0, x0)
+
+        # set intial guess
+        if prev_V is not None:
+            V_initial = np.array(prev_V[1:])
+            V_initial = np.append(V_initial, V_initial[-1])
+            self.opti.set_initial(self.V, V_initial)
 
         # solve
         sol = self.opti.solve()
@@ -203,31 +202,39 @@ class MPCC:
         start = time.time()
         timelist = np.array([])
 
-        xlist = np.array(x0)
-        ulist = np.array([[], [], [], []])
+        xlist = np.empty((14, step_no+1))
+        ulist = np.empty((4, step_no))
+        vlist = np.empty((1, step_no))
+        xlist[:, 0:1] = x0
+
         self.opti.set_value(self.X0, x0)
-        # calling the solver
 
         sol = self.opti.solve()
         for i in range(step_no):
-            x0 = self.dynamics_single(x0, self.torque_scaling(sol.value(self.U)[:, 0, None]), self.dt)
+            x0 = self.dynamics_single(x0, self.torque_scaling(sol.value(self.U)[:, 0, None]), sol.value(self.V)[0], self.dt)
             x0[pos_q:pos_omegab] = Quaternion(x0[pos_q:pos_omegab]).normalized().wxyz
 
-            ulist = np.append(ulist, self.torque_scaling(sol.value(self.U))[:, 0, None], axis=1)
-            xlist = np.append(xlist, x0, axis=1)
+            ulist[:, i:i+1] = self.torque_scaling(sol.value(self.U))[:, 0, None]
+            xlist[:, i+1:i+2] = x0
+            vlist[:, i:i+1] = sol.value(self.V)[0]
+
             end = time.time()
             timelist = np.append(timelist, end - start)
             start = time.time()
-
             # calling the solver
-            sol = self.optimization_step(x0, sol.value(self.X[:, :]), sol.value(self.U[:, :]), False)
+            sol = self.optimization_step(x0, sol.value(self.X), sol.value(self.U), sol.value(self.V), False)
+            inf_du = sol.stats()['iterations']['inf_du']
+            inf_pr = sol.stats()['iterations']['inf_pr']
+            plt.semilogy(np.arange(len(inf_du)), inf_du, label='inf_du')
+            plt.semilogy(np.arange(len(inf_pr)), inf_pr, label='inf_pr')
+            plt.show()
 
             # self.graph_infeasiblities(sol)
 
         if return_x:
-            return xlist, ulist, timelist
+            return xlist, ulist, vlist, timelist
         else:
-            return ulist, timelist
+            return ulist, vlist, timelist
 
     def graph_infeasiblities(self, sol):
         inf_du = sol.stats()['iterations']['inf_du']
@@ -260,12 +267,10 @@ class MPCC:
         omegaBdot = J_inv @ (u[1:4] - cs.cross(x[pos_omegab:pos_theta],
                                                cs.mtimes(J, x[pos_omegab:pos_theta])))
 
-        thetadot = cs.sum1(x[pos_V:pos_q] * path_direction_func(x[pos_theta]))
-
-        return cs.vertcat(rdot, Vdot, qdot, omegaBdot, thetadot)
+        return cs.vertcat(rdot, Vdot, qdot, omegaBdot, 0)
 
     @classmethod
-    def dynamics_single(cls, x, u, dt):
+    def dynamics_single(cls, x, u, v, dt):
         """ rk4 integration of the state derivative function
             :arg:
                 x::cs.MX(14, 1):state matrix
@@ -284,10 +289,15 @@ class MPCC:
         k4 = MPCC.derivative_single(x + k3 * dt, u)
 
         x_next = x + (k1 + k2 * 2 + k3 * 2 + k4) * dt / 6
+        x_next[pos_theta] = x[pos_theta] + v * dt
 
         return x_next
 
     @staticmethod
-    def torque_scaling(u, torque_scaling_xx=1, torque_scaling_yy=1, torque_scaling_zz=1):
+    def torque_scaling(u, torque_scaling_xx=25, torque_scaling_yy=25, torque_scaling_zz=25):
         return np.repeat(np.array([[1], [1 / torque_scaling_xx], [1 / torque_scaling_yy], [1 / torque_scaling_zz]]), u.shape[1], axis=1) * u
         # return np.diag([1, 1 / torque_scaling_xx, 1 / torque_scaling_yy, 1 / torque_scaling_zz]) @ u
+
+    @staticmethod
+    def V_scaling(v, v_scaling=1):
+        return v * v_scaling
