@@ -4,6 +4,7 @@ import liecasadi
 from utils import Quaternion, RotationQuaternion, create_vector_from_force
 from path import path_direction_func, path_position_func
 import time
+import matplotlib.pyplot as plt
 
 """class for MPCC controller, model included"""
 state = cs.MX.sym('state', 14, 1)
@@ -100,7 +101,7 @@ class MPCC:
     def _initalize_solver(self, max_iter=3000) -> None:
         """ initializes the solver, max_iter and expand are set"""
         p_opts = {"expand": True}
-        s_opts = {"max_iter": max_iter}
+        s_opts = {"max_iter": max_iter, "acceptable_dual_inf_tol": 1e-8, "acceptable_tol": 1e-5, "print_level": 6}
         self.opti.solver("ipopt", p_opts, s_opts)
 
     def derivative_multiple(self, x: cs.MX, u: cs.MX) -> cs.MX:
@@ -206,9 +207,7 @@ class MPCC:
         ulist = np.array([[], [], [], []])
         self.opti.set_value(self.X0, x0)
         # calling the solver
-        p_opts = {"expand": True}
-        s_opts = {"max_iter": 3000, "print_level": 3}
-        self.opti.solver("ipopt", p_opts, s_opts)
+
         sol = self.opti.solve()
         for i in range(step_no):
             x0 = self.dynamics_single(x0, self.torque_scaling(sol.value(self.U)[:, 0, None]), self.dt)
@@ -223,11 +222,19 @@ class MPCC:
             # calling the solver
             sol = self.optimization_step(x0, sol.value(self.X[:, :]), sol.value(self.U[:, :]), False)
 
+            # self.graph_infeasiblities(sol)
+
         if return_x:
             return xlist, ulist, timelist
         else:
             return ulist, timelist
 
+    def graph_infeasiblities(self, sol):
+        inf_du = sol.stats()['iterations']['inf_du']
+        inf_pr = sol.stats()['iterations']['inf_pr']
+        plt.semilogy(np.arange(len(inf_du)), inf_du, label='inf_du')
+        plt.semilogy(np.arange(len(inf_pr)), inf_pr, label='inf_pr')
+        plt.show()
     @classmethod
     def derivative_single(cls, x, u):
         """
@@ -281,6 +288,6 @@ class MPCC:
         return x_next
 
     @staticmethod
-    def torque_scaling(u, torque_scaling_xx=25, torque_scaling_yy=25, torque_scaling_zz=25):
+    def torque_scaling(u, torque_scaling_xx=1, torque_scaling_yy=1, torque_scaling_zz=1):
         return np.repeat(np.array([[1], [1 / torque_scaling_xx], [1 / torque_scaling_yy], [1 / torque_scaling_zz]]), u.shape[1], axis=1) * u
         # return np.diag([1, 1 / torque_scaling_xx, 1 / torque_scaling_yy, 1 / torque_scaling_zz]) @ u
