@@ -11,7 +11,7 @@ from path import path_position_func
 
 fig = plt.figure()
 ax = fig.add_subplot(111, projection='3d')
-t = np.linspace(-5, 5, 1000)
+t = np.linspace(-5, 10, 1000)
 
 def test_dynamics():
     """Test the dynamics of the drone"""
@@ -84,7 +84,7 @@ def draw_bg():
 
 
 def test_planning():
-    r0 = np.array([2, 0, 0])
+    r0 = np.array([1.01, 0, 0])
     v0 = np.array([0, 1, 1])
     q0 = np.array([-0.3826834324, 0, 0, 0.9238795325])
     omegaB0 = np.array([0, 0, 0])
@@ -119,9 +119,9 @@ def test_planning():
 
     ax.plot(np.cos(t), np.sin(t), t)
     ani = animation.FuncAnimation(fig, draw_drone, frames=xlist, interval=200, repeat=True, init_func=draw_bg())
-    # print(np.array2string(np.array(ulist), separator=", ", max_line_width=220))
-    # print(np.array2string(np.array(xlist), separator=", ", max_line_width=220))
-    # print(np.array2string(np.array(vlist), separator=", ", max_line_width=220))
+    print(np.array2string(np.array(ulist), separator=", ", max_line_width=220))
+    print(np.array2string(np.array(xlist), separator=", ", max_line_width=220))
+    print(np.array2string(np.array(vlist), separator=", ", max_line_width=220))
 
     plt.show()
 

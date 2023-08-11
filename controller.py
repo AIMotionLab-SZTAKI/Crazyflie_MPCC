@@ -4,6 +4,7 @@ import liecasadi
 from utils import Quaternion, RotationQuaternion, create_vector_from_force
 from path import path_direction_func, path_position_func
 import time
+import matplotlib.pyplot as plt
 
 """class for MPCC controller, model included"""
 state = cs.MX.sym('state', 14, 1)
@@ -223,6 +224,11 @@ class MPCC:
             start = time.time()
             # calling the solver
             sol = self.optimization_step(x0, sol.value(self.X), sol.value(self.U), sol.value(self.V), False)
+            inf_du = sol.stats()['iterations']['inf_du']
+            inf_pr = sol.stats()['iterations']['inf_pr']
+            plt.semilogy(np.arange(len(inf_du)), inf_du, label='inf_du')
+            plt.semilogy(np.arange(len(inf_pr)), inf_pr, label='inf_pr')
+            plt.show()
 
         if return_x:
             return xlist, ulist, vlist, timelist
@@ -284,3 +290,7 @@ class MPCC:
     def torque_scaling(u, torque_scaling_xx=25, torque_scaling_yy=25, torque_scaling_zz=25):
         return np.repeat(np.array([[1], [1 / torque_scaling_xx], [1 / torque_scaling_yy], [1 / torque_scaling_zz]]), u.shape[1], axis=1) * u
         # return np.diag([1, 1 / torque_scaling_xx, 1 / torque_scaling_yy, 1 / torque_scaling_zz]) @ u
+
+    @staticmethod
+    def V_scaling(v, v_scaling=1):
+        return v * v_scaling
