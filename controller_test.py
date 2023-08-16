@@ -7,11 +7,12 @@ import casadi as cs
 from MPCC_with_maps import dynamics
 from matplotlib import animation
 import time
-from path import path_position_func
+from path import path_position_func, path_direction_func, steepness_func
 
 fig = plt.figure()
 ax = fig.add_subplot(111, projection='3d')
-t = np.linspace(-5, 10, 1000)
+#ax_flat = fig.add_subplot(122)
+t = np.linspace(-1, 3.14*np.sqrt(2), 50)
 
 def test_dynamics():
     """Test the dynamics of the drone"""
@@ -77,20 +78,20 @@ def draw_bg():
     ax.set_xlabel('x')
     ax.set_ylabel('y')
     ax.set_zlabel('z')
-    ax.set_xlim(-4, 6)
-    ax.set_ylim(-5, 5)
-    ax.set_zlim(-5, 5)
+    ax.set_xlim(-1.5, 1.5)
+    ax.set_ylim(-1.5, 1.5)
+    ax.set_zlim(0, 3)
     # ax.plot(np.cos(t), np.sin(t), t)
 
 
 def test_planning():
-    r0 = np.array([1.01, 0, 0])
-    v0 = np.array([0, 1, 1])
-    q0 = np.array([-0.3826834324, 0, 0, 0.9238795325])
+    r0 = np.array([1.01, 0, 1])
+    v0 = np.array([0, 1, -1])
+    q0 = np.array([-0.9238795325, 0, 0, 0.3826834324])
     omegaB0 = np.array([0, 0, 0])
     x0 = cs.DM(cs.vertcat(r0, v0, q0, omegaB0, 0))
-    sim_length = 25
-    dt = 0.02
+    sim_length = 35
+    dt = 0.01
     MPCC = controller.MPCC(horizon=20, dt=dt)
     u_initial = np.array(
         [[3.99999997e+00, 3.99999996e+00, 3.99999994e+00, 4.00000000e+00, 3.99999989e+00, 3.99999988e+00,
@@ -107,17 +108,18 @@ def test_planning():
           1.49998870e-02, -1.49998995e-02, 1.49999583e-02]])
 
     start = time.time()
-    ulist, vlist, timelist = MPCC.generate_full_trajectory(sim_length, x0=x0, u_initial=u_initial)
+    xlist, ulist, vlist, timelist = MPCC.generate_full_trajectory(sim_length, x0=x0, u_initial=u_initial)
     end = time.time()
     print('time taken for each iteration:', timelist)
     print('iteration sum:', sum(timelist))
     print('full trajectory generation time:', end-start)
-    xlist = [x0]
+    # xlist = [x0]
     # Rotate the axes and update
-    for i in range(sim_length):
-        xlist.append(controller.MPCC.dynamics_single(xlist[-1], ulist[:, i, None], vlist[:, i, None], dt))
+    # for i in range(sim_length):
+        # xlist.append(controller.MPCC.dynamics_single(xlist[-1], ulist[:, i, None], vlist[:, i, None], dt))
 
-    ax.plot(np.cos(t), np.sin(t), t)
+    curve = np.array([path_position_func(i) for i in t])
+    ax.plot(curve[:, 0, 0], curve[:, 1, 0], curve[:, 2, 0], color='g')
     ani = animation.FuncAnimation(fig, draw_drone, frames=xlist, interval=200, repeat=True, init_func=draw_bg())
     print(np.array2string(np.array(ulist), separator=", ", max_line_width=220))
     print(np.array2string(np.array(xlist), separator=", ", max_line_width=220))
@@ -125,5 +127,17 @@ def test_planning():
 
     plt.show()
 
+def test_path():
+    draw_bg()
+
+    curve = np.array([path_position_func(i) for i in t])
+    ax.plot(curve[:, 0, 0], curve[:, 1, 0], curve[:, 2, 0], color='g')
+    theta = np.linspace(0, 3.14*np.sqrt(2), 16)
+    direction = np.array([path_direction_func(i) for i in theta])
+    pos = np.array([path_position_func(i) for i in theta])
+    steepness = np.array([steepness_func(i) for i in theta])
+    #ax_flat.scatter(theta, steepness[:, 0, 0])
+    ax.quiver(pos[:, 0, 0], pos[:, 1, 0], pos[:, 2, 0], direction[:, 0, 0], direction[:, 1, 0], direction[:, 2, 0], color='r')
+    plt.show()
 if __name__ == '__main__':
     test_planning()

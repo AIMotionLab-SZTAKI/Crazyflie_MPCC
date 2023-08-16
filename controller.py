@@ -52,29 +52,33 @@ class MPCC:
         self.X = self.opti.variable(n_states, horizon + 1)
         self.U = self.opti.variable(4, horizon)
         self.U_scaled = self.torque_scaling(self.U)
+        self.V = self.opti.variable(1, self.horizon)
 
         # parameters
         self.X0 = self.opti.parameter(n_states, 1)
 
+        err_lag, err_con, vel = self._cost_function()
         # cost function
-        self.opti.minimize(self._cost_function())
+        self.opti.minimize(err_lag + err_con - vel)
 
         # dynamics constraints
         self.opti.subject_to(self.X[:, 0] == self.X0)
         self.opti.subject_to(self.X[:, 1:] == self.dynamics_mulitple(self.X[:, 0:-1], self.U_scaled, self.V))
-        self.opti.subject_to(self.opti.bounded(-20, cs.vec(self.X[10:13, :]), 20))
+        self.opti.subject_to(self.opti.bounded(-20, cs.vec(self.X[10:13, 1:]), 20))
+        self.opti.subject_to(0<=self.X[13, 1:])
+        # self.opti.subject_to(self.opti.bounded(-18, cs.vec(self.X[10:13, ]), 18))
 
         # input constraints
-        self.opti.subject_to(self.opti.bounded(0, cs.vec(self.U[0, :]), 4))
+        self.opti.subject_to(self.opti.bounded(0, cs.vec(self.U[0, :]), 6))
         self.opti.subject_to(self.opti.bounded(-5, cs.vec(self.U[1:, :]), 5))
 
         # solver
         self._initalize_solver()
 
-    def _cost_function(self) -> None:
+    def _cost_function(self) -> tuple:
         # cost function weights
-        qc = 0.5 * cs.DM.ones((1, self.horizon))
-        ql = 2 * cs.DM_eye(self.horizon)
+        qc = 2 * cs.DM.ones((1, self.horizon))
+        ql = 0.4 * cs.DM_eye(self.horizon)
         nu = 0.001 * cs.DM.ones(self.horizon).T
 
         path_position = path_position_func.map(self.horizon+1)(self.X[pos_theta, :])
@@ -89,14 +93,12 @@ class MPCC:
 
         # contouring error vector
         err_con = err - path_direction[:, 1:] @ cs.diag(cs.sum1(err * path_direction[:, 1:]))
+        return err_lag @ ql @ err_lag.T, cs.dot(cs.sum1(err_con ** 2), qc), cs.dot(self.V, nu)
 
-        # cost function
-        return err_lag @ ql @ err_lag.T + cs.dot(cs.sum1(err_con ** 2), qc) - cs.dot(self.V, nu)
-
-    def _initalize_solver(self, max_iter=3000) -> None:
+    def _initalize_solver(self, max_iter=10000) -> None:
         """ initializes the solver, max_iter and expand are set"""
         p_opts = {"expand": True}
-        s_opts = {"max_iter": max_iter, "acceptable_dual_inf_tol": 1e-8, "acceptable_tol": 1e-5, "print_level": 6}
+        s_opts = {"max_iter": max_iter, "print_level": 1}
         self.opti.solver("ipopt", p_opts, s_opts)
 
     def derivative_multiple(self, x: cs.MX, u: cs.MX) -> cs.MX:
@@ -177,7 +179,7 @@ class MPCC:
         sol = self.opti.solve()
         return sol
 
-    def generate_full_trajectory(self, step_no, x0=None, x_intial=None, u_initial=None, return_x=False) -> (np.ndarray, np.ndarray):
+    def generate_full_trajectory(self, step_no, x0=None, x_intial=None, u_initial=None, return_x=True) -> (np.ndarray, np.ndarray, np.ndarray, np.ndarray):
         """
         generates a full trajectory with the given initial conditions
         :arg:
@@ -205,17 +207,17 @@ class MPCC:
         xlist = np.empty((14, step_no+1))
         ulist = np.empty((4, step_no))
         vlist = np.empty((1, step_no))
-        xlist[:, 0:1] = x0
+        xlist = [x0]
 
         self.opti.set_value(self.X0, x0)
 
         sol = self.opti.solve()
         for i in range(step_no):
-            x0 = self.dynamics_single(x0, self.torque_scaling(sol.value(self.U)[:, 0, None]), sol.value(self.V)[0], self.dt)
+            x0 = self.ode_dynamics(x0, self.torque_scaling(sol.value(self.U)[:, 0, None]), sol.value(self.V)[0], self.dt)
             x0[pos_q:pos_omegab] = Quaternion(x0[pos_q:pos_omegab]).normalized().wxyz
 
             ulist[:, i:i+1] = self.torque_scaling(sol.value(self.U))[:, 0, None]
-            xlist[:, i+1:i+2] = x0
+            xlist.append(x0)
             vlist[:, i:i+1] = sol.value(self.V)[0]
 
             end = time.time()
@@ -223,12 +225,6 @@ class MPCC:
             start = time.time()
             # calling the solver
             sol = self.optimization_step(x0, sol.value(self.X), sol.value(self.U), sol.value(self.V), False)
-            inf_du = sol.stats()['iterations']['inf_du']
-            inf_pr = sol.stats()['iterations']['inf_pr']
-            plt.semilogy(np.arange(len(inf_du)), inf_du, label='inf_du')
-            plt.semilogy(np.arange(len(inf_pr)), inf_pr, label='inf_pr')
-            plt.show()
-
             # self.graph_infeasiblities(sol)
 
         if return_x:
@@ -301,3 +297,13 @@ class MPCC:
     @staticmethod
     def V_scaling(v, v_scaling=1):
         return v * v_scaling
+
+    @classmethod
+    def ode_dynamics(cls, x0, u0, v0, dt):
+        ode = {'x': state, 'u': input, 'ode': cls.derivative_single(state, input)}
+        F = cs.integrator('F', 'cvodes', ode, {'t0': 0, 'tf': dt})
+        res = F(x0=x0, u=u0)['xf']
+        res[-1] = res[-1] + v0 * dt
+        return res
+
+
