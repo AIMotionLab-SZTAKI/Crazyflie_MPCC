@@ -2,7 +2,7 @@ import casadi as cs
 import numpy as np
 import liecasadi
 from utils import Quaternion, RotationQuaternion, create_vector_from_force
-from path import path_direction_func, path_position_func
+from path import path_direction_func, path_position_func, linearize_path
 import time
 import matplotlib.pyplot as plt
 
@@ -11,7 +11,7 @@ state = cs.MX.sym('state', 14, 1)
 input = cs.MX.sym('input', 4, 1)
 quaternion = cs.MX.sym('quaternion', 4, 1)
 vector = cs.MX.sym('vector', 3, 1)
-
+scalar = cs.MX.sym('scalar', 1, 1)
 # state variable dimensions
 n_r = 3
 n_V = 3
@@ -39,9 +39,21 @@ dragCoefficient = 7.24e-10  # N*m*s^2
 propdist = 0.092
 gyokketto = np.sqrt(2)
 
-class MPCC:
+columnwise_multiplication = cs.Function('columnwise_multiplication', [scalar, vector], [vector @ scalar])
 
-    def __init__(self, horizon, dt=0.02):
+def test_linarization(i):
+    t = np.linspace(-1, 2 * 3.14 * np.sqrt(2), 50)
+    curve = np.array([path_position_func(i) for i in t])
+    plt.plot(curve[:, 0, 0], curve[:, 1, 0], curve[:, 2, 0], color='g')
+    point, direction = linearize_path(i)
+    line = np.array(point) + np.array(direction) * t
+    plt.plot(line[0], line[1], line[2], color='r')
+    plt.show()
+
+
+class MPCC_for_bodyrate:
+
+    def __init__(self, horizon, dt=0.02, path=None):
         self.horizon = horizon
         self.dt = dt
         horizon = horizon
@@ -49,35 +61,47 @@ class MPCC:
         self.opti = cs.Opti()
 
         # decision variables
-        self.X = self.opti.variable(n_states, horizon + 1)
-        self.U = self.opti.variable(4, horizon)
+        self.X = self.opti.variable(n_states, horizon + 1)  # state vector
+        self.U = self.opti.variable(4, horizon)  # thrust and change of bodyrate
         self.U_scaled = self.torque_scaling(self.U)
         self.V = self.opti.variable(1, self.horizon)
 
         # parameters
         self.X0 = self.opti.parameter(n_states, 1)
+        self.line_start_location = self.opti.parameter(3, 1)
+        self.line_dir = self.opti.parameter(3, 1)
+        self.line_start_along_path = self.opti.parameter(1, 1)
 
-        err_lag, err_con, vel = self._cost_function()
+
+        if path is not None:
+            self.path_obj = path
+        err_lag, err_con, vel = self._cost_function_spline()
         # cost function
         self.opti.minimize(err_lag + err_con - vel)
 
         # dynamics constraints
         self.opti.subject_to(self.X[:, 0] == self.X0)
         self.opti.subject_to(self.X[:, 1:] == self.dynamics_mulitple(self.X[:, 0:-1], self.U_scaled, self.V))
-        self.opti.subject_to(self.opti.bounded(-20, cs.vec(self.X[10:13, 1:]), 20))
-        self.opti.subject_to(0<=self.X[13, 1:])
+
+        self.opti.subject_to(0 <= self.X[13, 1:])
         # self.opti.subject_to(self.opti.bounded(-18, cs.vec(self.X[10:13, ]), 18))
 
         # input constraints
-        self.opti.subject_to(self.opti.bounded(0, cs.vec(self.U[0, :]), 6))
-        self.opti.subject_to(self.opti.bounded(-5, cs.vec(self.U[1:, :]), 5))
+        self.opti.subject_to(self.opti.bounded(0, cs.vec(self.U[0, :]), 10))
+        self.opti.subject_to(self.opti.bounded(-5/self.dt, cs.vec(self.U[1:, :]), 5/self.dt))
+        self.opti.subject_to(self.opti.bounded(-10, cs.vec(self.V), 100))
 
+        # reality contraints
+        # self.opti.subject_to(self.opti.bounded(-19, cs.vec(self.X[pos_V:pos_q, 1]), 19))
+        # self.opti.subject_to(self.opti.bounded(-20, cs.vec(self.X[pos_V:pos_q, 2:]), 20))
+        # self.opti.subject_to(self.opti.bounded(-19, cs.vec(self.X[10:13, 1]), 19))
+        self.opti.subject_to(self.opti.bounded(-20, cs.vec(self.X[10:13, 2:]), 20))
         # solver
         self._initalize_solver()
 
-    def _cost_function(self) -> tuple:
+    def _cost_function_old(self) -> tuple:
         # cost function weights
-        qc = 5 * cs.DM.ones((1, self.horizon))
+        qc = 2 * cs.DM.ones((1, self.horizon))
         ql = 0.4 * cs.DM_eye(self.horizon)
         nu = 0.001 * cs.DM.ones(self.horizon).T
 
@@ -93,13 +117,67 @@ class MPCC:
 
         # contouring error vector
         err_con = err - path_direction[:, 1:] @ cs.diag(cs.sum1(err * path_direction[:, 1:]))
+
         return err_lag @ ql @ err_lag.T, cs.dot(cs.sum1(err_con ** 2), qc), cs.dot(self.V, nu)
 
+    def error(self, position, path_progress):
+        "calculate the error for one point"
+        err = position - self.line_start_location + self.line_dir @ (path_progress - self.line_start_along_path)
+        err_lag = cs.dot(err, self.line_dir)
+        err_con = err - self.line_dir * err_lag
+        return err_lag, err_con
+
+    def _cost_function_new(self) -> tuple:
+
+        # cost function weights
+        qc = 2 * cs.DM.ones((1, self.horizon))
+        ql = 0.4 * cs.DM_eye(self.horizon)
+        nu = 0.001 * cs.DM.ones(self.horizon).T
+        qc[:4] = qc[:4] * 2
+        path_position = cs.repmat(self.line_start_location, 1, self.horizon+1) + cs.repmat((self.X[pos_theta ,:] - cs.repmat(self.line_start_along_path, 1, self.horizon+1)), 3, 1) * cs.repmat(self.line_dir, 1, self.horizon+1)
+
+        path_direction = cs.repmat(self.line_dir, 1, self.horizon+1)
+
+        # error vector
+        err = self.X[0:pos_V, 1:] - path_position[:, 1:]
+
+        # lag error vector
+        err_lag = cs.sum1(err * path_direction[:, 1:])
+
+        # contouring error vector
+        err_con = err - path_direction[:, 1:] @ cs.diag(cs.sum1(err * path_direction[:, 1:]))
+
+        return err_lag @ ql @ err_lag.T, cs.dot(cs.sum1(err_con ** 2), qc), cs.dot(self.V, nu)
+
+    def _cost_function_spline(self):
+
+        # cost function weights
+        qc = 2 * cs.DM.ones((1, self.horizon))
+        ql = 0.4 * cs.DM_eye(self.horizon)
+        nu = 0.001 * cs.DM.ones(self.horizon).T
+
+        pp_func = cs.Function('pp_func', [scalar], [self.path_obj.get_path_parameters(scalar)[0]])
+        pd_func = cs.Function('pd_func', [scalar], [self.path_obj.get_path_parameters(scalar)[1]])
+
+        path_position = pp_func.map(self.horizon + 1)(self.X[pos_theta, :])
+
+        path_direction = pd_func.map(self.horizon + 1)(self.X[pos_theta, :])
+
+        # error vector
+        err = self.X[0:pos_V, 1:] - path_position[:, 1:]
+
+        # lag error vector
+        err_lag = cs.sum1(err * path_direction[:, 1:])
+
+        # contouring error vector
+        err_con = err - path_direction[:, 1:] @ cs.diag(cs.sum1(err * path_direction[:, 1:]))
+
+        return err_lag @ ql @ err_lag.T, cs.dot(cs.sum1(err_con ** 2), qc), cs.dot(self.V, nu)
     def _initalize_solver(self, max_iter=10000) -> None:
         """ initializes the solver, max_iter and expand are set"""
-        p_opts = {"expand": True}
-        s_opts = {"max_iter": max_iter, "print_level": 1}
-        self.opti.solver("ipopt", p_opts, s_opts)
+        p_opts = {"expand": False}
+        s_opts = {"max_iter": max_iter, "print_level": 5, 'fast_step_computation': "no"}
+        self.opti.solver("blocksqp")
 
     def derivative_multiple(self, x: cs.MX, u: cs.MX) -> cs.MX:
         """
@@ -125,8 +203,9 @@ class MPCC:
 
         omegaBdot = J_inv @ (u[1:4, :] - cs.cross(x[pos_omegab:pos_theta, :],
                                                   cs.mtimes(J, x[pos_omegab:pos_theta, :])))
-        placeholder = cs.DM.zeros((1, self.horizon))
-        return cs.vertcat(rdot, Vdot, qdot, omegaBdot, placeholder)
+        placeholder1 = cs.DM.zeros((1, self.horizon))
+        placeholder3 = cs.DM.zeros((3, self.horizon))
+        return cs.vertcat(rdot, Vdot, qdot, placeholder3, placeholder1)
 
     def dynamics_mulitple(self, x: cs.MX, u: cs.MX, v:cs.MX) -> cs.MX:
         """ rk4 step for the dynamics, x is the state, u is the rotor rpm input"""
@@ -137,7 +216,7 @@ class MPCC:
 
         x_next = x + (k1 + k2 * 2 + k3 * 2 + k4) * self.dt / 6
         x_next[pos_theta, :] = x[pos_theta, :] + v * self.dt
-
+        x_next[pos_omegab:pos_theta, :] = x_next[pos_omegab:pos_theta, :] + u[1:4, :] * self.dt
         return x_next
 
     def optimization_step(self, x0, prev_X=None, prev_U=None, prev_V=None, U_is_initial=False) -> (np.ndarray, np.ndarray):
@@ -204,28 +283,61 @@ class MPCC:
         start = time.time()
         timelist = np.array([])
 
-        xlist = np.empty((14, step_no+1))
         ulist = np.empty((4, step_no))
         vlist = np.empty((1, step_no))
         xlist = [x0]
 
         self.opti.set_value(self.X0, x0)
-
         sol = self.opti.solve()
-        for i in range(step_no):
-            x0 = self.ode_dynamics(x0, self.torque_scaling(sol.value(self.U)[:, 0, None]), sol.value(self.V)[0], self.dt)
-            x0[pos_q:pos_omegab] = Quaternion(x0[pos_q:pos_omegab]).normalized().wxyz
 
-            ulist[:, i:i+1] = self.torque_scaling(sol.value(self.U))[:, 0, None]
-            xlist.append(x0)
-            vlist[:, i:i+1] = sol.value(self.V)[0]
+        # update state
+        x0 = self.ode_dynamics(x0, self.torque_scaling(sol.value(self.U)[:, 0, None]), sol.value(self.V)[0], self.dt)
+        x0[pos_q:pos_omegab] = Quaternion(x0[pos_q:pos_omegab]).normalized().wxyz
 
-            end = time.time()
-            timelist = np.append(timelist, end - start)
-            start = time.time()
+        # log variables
+        ulist[:, 0:1] = self.torque_scaling(sol.value(self.U))[:, 0, None]
+        xlist.append(x0)
+        vlist[:, 0:1] = sol.value(self.V)[0]
+
+        # linearize path
+        line_start_location, line_dir = linearize_path(x0[pos_theta])
+        self.opti.set_value(self.line_start_location, line_start_location)
+        self.opti.set_value(self.line_start_along_path, x0[pos_theta])
+        self.opti.set_value(self.line_dir, line_dir)
+
+        # err_lag, err_con, vel = self._cost_function_new()
+        # self.opti.minimize(err_lag + err_con - vel)
+
+        end = time.time()
+        timelist = np.append(timelist, end - start)
+        for i in range(1, step_no):
+            print(self.opti.debug.value(self.line_start_location))
+            print(self.opti.debug.value(self.line_dir))
+            print(self.opti.debug.value(self.line_start_along_path))
+            print(x0)
             # calling the solver
             sol = self.optimization_step(x0, sol.value(self.X), sol.value(self.U), sol.value(self.V), False)
             # self.graph_infeasiblities(sol)
+
+            # update position
+            x0 = self.ode_dynamics(x0, self.torque_scaling(sol.value(self.U)[:, 0, None]), sol.value(self.V)[0],
+                                   self.dt)
+            x0[pos_q:pos_omegab] = Quaternion(x0[pos_q:pos_omegab]).normalized().wxyz
+
+            ulist[:, i:i + 1] = self.torque_scaling(sol.value(self.U))[:, 0, None]
+            xlist.append(x0)
+            vlist[:, i:i + 1] = sol.value(self.V)[0]
+
+            # linearize path
+            line_start_location, line_dir = linearize_path(x0[pos_theta])
+            self.opti.set_value(self.line_start_location, line_start_location)
+            self.opti.set_value(self.line_start_along_path, x0[pos_theta])
+            self.opti.set_value(self.line_dir, line_dir)
+
+            timelist = np.append(timelist, time.time() - end)
+            end = time.time()
+
+
 
         if return_x:
             return xlist, ulist, vlist, timelist
@@ -263,7 +375,7 @@ class MPCC:
         omegaBdot = J_inv @ (u[1:4] - cs.cross(x[pos_omegab:pos_theta],
                                                cs.mtimes(J, x[pos_omegab:pos_theta])))
 
-        return cs.vertcat(rdot, Vdot, qdot, omegaBdot, 0)
+        return cs.vertcat(rdot, Vdot, qdot, 0, 0, 0, 0)
 
     @classmethod
     def dynamics_single(cls, x, u, v, dt):
@@ -279,18 +391,19 @@ class MPCC:
         # rk4 step
         # d2 = cs.Function('d2', [state, input], [derivative2(state, input)])
         # derivative_mapped = d2.map(N)
-        k1 = MPCC.derivative_single(x, u)
-        k2 = MPCC.derivative_single(x + (k1 * 0.5 * dt), u)
-        k3 = MPCC.derivative_single(x + (k2 * 0.5 * dt), u)
-        k4 = MPCC.derivative_single(x + k3 * dt, u)
+        k1 = MPCC_for_bodyrate.derivative_single(x, u)
+        k2 = MPCC_for_bodyrate.derivative_single(x + (k1 * 0.5 * dt), u)
+        k3 = MPCC_for_bodyrate.derivative_single(x + (k2 * 0.5 * dt), u)
+        k4 = MPCC_for_bodyrate.derivative_single(x + k3 * dt, u)
 
         x_next = x + (k1 + k2 * 2 + k3 * 2 + k4) * dt / 6
         x_next[pos_theta] = x[pos_theta] + v * dt
+        x_next[pos_omegab:pos_theta] = x[pos_omegab:pos_theta] + u[1:4] * dt
 
         return x_next
 
     @staticmethod
-    def torque_scaling(u, torque_scaling_xx=25, torque_scaling_yy=25, torque_scaling_zz=25):
+    def torque_scaling(u, torque_scaling_xx=0.02, torque_scaling_yy=0.02, torque_scaling_zz=0.02):
         return np.repeat(np.array([[1], [1 / torque_scaling_xx], [1 / torque_scaling_yy], [1 / torque_scaling_zz]]), u.shape[1], axis=1) * u
         # return np.diag([1, 1 / torque_scaling_xx, 1 / torque_scaling_yy, 1 / torque_scaling_zz]) @ u
 
@@ -303,7 +416,8 @@ class MPCC:
         ode = {'x': state, 'u': input, 'ode': cls.derivative_single(state, input)}
         F = cs.integrator('F', 'cvodes', ode, {'t0': 0, 'tf': dt})
         res = F(x0=x0, u=u0)['xf']
-        res[-1] = res[-1] + v0 * dt
+        res[pos_theta] = res[pos_theta] + v0 * dt
+        res[pos_omegab:pos_theta] = res[pos_omegab:pos_theta] + u0[1:4] * dt
         return res
 
 
