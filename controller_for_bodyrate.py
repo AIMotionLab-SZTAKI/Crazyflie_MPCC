@@ -12,20 +12,34 @@ input = cs.MX.sym('input', 4, 1)
 quaternion = cs.MX.sym('quaternion', 4, 1)
 vector = cs.MX.sym('vector', 3, 1)
 scalar = cs.MX.sym('scalar', 1, 1)
-# state variable dimensions
-n_r = 3
-n_V = 3
-n_q = 4
-n_omegab = 3
-n_theta = 1
+
+# state variable dimensions inside the state vector
+sv_dim={'r': 3, 'V': 3, 'q': 4, 'omegab': 3, 'thrust': 0, 'theta': 1, 'vtheta': 0}
+n_r = sv_dim['r'] # these are for bakcwards compatibility
+n_V = sv_dim['V']
+n_q = sv_dim['q']
+n_omegab = sv_dim['omegab']
+n_thrust = sv_dim['thrust']
+n_theta = sv_dim['theta']
+n_vtheta = sv_dim['vtheta']
 
 # state variable positions in the state vector
+sv_pos = {'r': 0,
+          'V': n_r,
+          'q': n_r+n_V,
+          'omegab': n_r+n_V+n_q,
+          'thrust': n_r+n_V+n_q+n_omegab,
+          'theta': n_r+n_V+n_q+n_omegab+n_thrust,
+          'vtheta': n_r+n_V+n_q+n_omegab+n_thrust+n_theta}
 pos_r = 0
-pos_V = n_r
-pos_q = pos_V + n_V
-pos_omegab = pos_q + n_q
-pos_theta = pos_omegab + n_omegab
-n_states = n_r + n_V + n_q + n_omegab + n_theta
+pos_V = sv_pos['V']
+pos_q = sv_pos['q']
+pos_omegab = sv_pos['omegab']
+pos_thrust = sv_pos['thrust']
+pos_theta = sv_pos['theta']
+pos_vtheta = sv_pos['vtheta']
+
+n_states = sum(sv_dim.values())  # number of states
 
 # drone data
 mass = 0.028  # kg
@@ -57,16 +71,15 @@ class MPCC_for_bodyrate:
         self.horizon = horizon
         self.dt = dt
         horizon = horizon
+
         # opti initialization
         self.opti = cs.Opti()
 
         # decision variables
         self.X = self.opti.variable(n_states, horizon + 1)  # state vector
-        self.U = self.opti.variable(4, horizon)  # thrust and change of bodyrate
-        self.U_scaled = self.torque_scaling(self.U)
-        self.V = self.opti.variable(1, self.horizon)
-
-        # parameters
+        self.U = self.opti.variable(4, horizon)  # thrust, body rate
+        self.V = self.opti.variable(1, horizon)  # path velocity
+        # parameters for path linearization
         self.X0 = self.opti.parameter(n_states, 1)
         self.line_start_location = self.opti.parameter(3, 1)
         self.line_dir = self.opti.parameter(3, 1)
@@ -75,7 +88,7 @@ class MPCC_for_bodyrate:
 
         if path is not None:
             self.path_obj = path
-        err_lag, err_con, vel = self._cost_function_spline()
+        err_lag, err_con, vel = self._cost_function_old()
         # cost function
         self.opti.minimize(err_lag + err_con - vel)
 
@@ -88,13 +101,11 @@ class MPCC_for_bodyrate:
 
         # input constraints
         self.opti.subject_to(self.opti.bounded(0, cs.vec(self.U[0, :]), 10))
-        self.opti.subject_to(self.opti.bounded(-5/self.dt, cs.vec(self.U[1:, :]), 5/self.dt))
+        self.opti.subject_to(self.opti.bounded(-5, cs.vec(self.U[1:4, :]), 5))
         self.opti.subject_to(self.opti.bounded(-10, cs.vec(self.V), 100))
 
         # reality contraints
-        # self.opti.subject_to(self.opti.bounded(-19, cs.vec(self.X[pos_V:pos_q, 1]), 19))
-        # self.opti.subject_to(self.opti.bounded(-20, cs.vec(self.X[pos_V:pos_q, 2:]), 20))
-        # self.opti.subject_to(self.opti.bounded(-19, cs.vec(self.X[10:13, 1]), 19))
+        self.opti.subject_to(self.opti.bounded(-20, cs.vec(self.X[pos_V:pos_q, 2:]), 20))
         self.opti.subject_to(self.opti.bounded(-20, cs.vec(self.X[10:13, 2:]), 20))
         # solver
         self._initalize_solver()
@@ -134,7 +145,7 @@ class MPCC_for_bodyrate:
         ql = 0.4 * cs.DM_eye(self.horizon)
         nu = 0.001 * cs.DM.ones(self.horizon).T
         qc[:4] = qc[:4] * 2
-        path_position = cs.repmat(self.line_start_location, 1, self.horizon+1) + cs.repmat((self.X[pos_theta ,:] - cs.repmat(self.line_start_along_path, 1, self.horizon+1)), 3, 1) * cs.repmat(self.line_dir, 1, self.horizon+1)
+        path_position = cs.repmat(self.line_start_location, 1, self.horizon+1) + cs.repmat((self.X[pos_theta, :] - cs.repmat(self.line_start_along_path, 1, self.horizon+1)), 3, 1) * cs.repmat(self.line_dir, 1, self.horizon+1)
 
         path_direction = cs.repmat(self.line_dir, 1, self.horizon+1)
 
@@ -176,8 +187,8 @@ class MPCC_for_bodyrate:
     def _initalize_solver(self, max_iter=10000) -> None:
         """ initializes the solver, max_iter and expand are set"""
         p_opts = {"expand": False}
-        s_opts = {"max_iter": max_iter, "print_level": 5, 'fast_step_computation': "no"}
-        self.opti.solver("blocksqp")
+        s_opts = {"max_iter": max_iter, "print_level": 2, 'fast_step_computation': "no", 'acceptable_tol': 1e-6, 'nlp_scaling_max_gradient': 10, 'nlp_scaling_min_value': 1e-2, 'acceptable_iter': 5, 'linear_solver': 'mumps', 'alpha_for_y': 'max'}
+        self.opti.solver("ipopt", p_opts, s_opts)
 
     def derivative_multiple(self, x: cs.MX, u: cs.MX) -> cs.MX:
         """
@@ -205,6 +216,7 @@ class MPCC_for_bodyrate:
                                                   cs.mtimes(J, x[pos_omegab:pos_theta, :])))
         placeholder1 = cs.DM.zeros((1, self.horizon))
         placeholder3 = cs.DM.zeros((3, self.horizon))
+
         return cs.vertcat(rdot, Vdot, qdot, placeholder3, placeholder1)
 
     def dynamics_mulitple(self, x: cs.MX, u: cs.MX, v:cs.MX) -> cs.MX:

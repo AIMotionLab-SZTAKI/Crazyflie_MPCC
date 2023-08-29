@@ -108,11 +108,11 @@ def test_planning_brate():
     omegaB0 = np.array([0, 0, 0])
     x0 = cs.DM(cs.vertcat(r0, v0, q0, omegaB0, 0))
     sim_length = 44
-    dt = 0.02
+    dt = 0.01
 
 
 
-    MPCC = controller_for_bodyrate.MPCC_for_bodyrate(horizon=20, dt=dt, path=spline)
+    MPCC = controller_for_bodyrate.MPCC_for_bodyrate(horizon=10, dt=dt)
 
     start = time.time()
     xlist, ulist, vlist, timelist = MPCC.generate_full_trajectory(sim_length, x0=x0)
@@ -128,8 +128,8 @@ def test_planning_brate():
     curve = np.array([spline.get_path_parameters(i)[0] for i in t])
     ax.plot(curve[:, 0], curve[:, 1], curve[:, 2], color='g')
     ani = animation.FuncAnimation(fig, draw_drone, frames=xlist, interval=200, repeat=True, init_func=draw_bg())
-    print(np.array2string(np.array(ulist), separator=", ", max_line_width=220))
-    print(np.array2string(np.array(xlist), separator=", ", max_line_width=220))
+    # print(np.array2string(np.array(ulist), separator=", ", max_line_width=220))
+    # print(np.array2string(np.array(xlist), separator=", ", max_line_width=220))
     # print(np.array2string(np.array(vlist), separator=", ", max_line_width=220))
 
     plt.show()
@@ -143,6 +143,7 @@ def test_planning_full_nlp():
     x0 = cs.DM(cs.vertcat(r0, v0, q0, omegaB0, 0))
     sim_length = 35
     dt = 0.02
+
     MPCC = controller.MPCC(horizon=10, dt=dt)
 
 
