@@ -1,5 +1,6 @@
 import controller
 import controller_for_bodyrate
+import controller_incremental_brate
 import matplotlib.pyplot as plt
 import numpy as np
 from utils import RotationQuaternion
@@ -84,7 +85,7 @@ def draw_drone(state):
     body_y_ax = ax.quiver(x, y, z, Y[0], Y[1], Y[2], color='g')
     body_z_ax = ax.quiver(x, y, z, Z[0], Z[1], Z[2], color='b')
 
-    path_loc = np.array(spline.get_path_parameters(state[-1])[0])
+    path_loc = np.array(path_position_func(state[-1]))
     ax.plot(np.array([x, path_loc[0, None]])[:, 0, 0], np.array([y, path_loc[1, None]])[:, 0, 0],
             np.array([z, path_loc[2, None]])[:, 0, 0], color='r')
 
@@ -131,6 +132,35 @@ def test_planning_brate():
     # print(np.array2string(np.array(ulist), separator=", ", max_line_width=220))
     # print(np.array2string(np.array(xlist), separator=", ", max_line_width=220))
     # print(np.array2string(np.array(vlist), separator=", ", max_line_width=220))
+
+    plt.show()
+
+def test_planning_incremental():
+    r0 = np.array([1, 0, 0])
+    v0 = np.array([0, 1, 1])
+    q0 = np.array([-0.9238795325, 0, 0, 0.3826834324])
+    omegaB0 = np.array([0, 0, 0])
+    x0 = cs.DM(cs.vertcat(r0, v0, q0, 0, 0, 0, 0, 0, 0))
+    sim_length = 20
+    dt = 0.01
+
+    MPCC = controller_incremental_brate.MpccIncrementalBRate(horizon=10, dt=dt)
+
+    start = time.time()
+    xlist, ulist, timelist = MPCC.generate_full_trajectory(sim_length, x0=x0)
+    end = time.time()
+    print('time taken for each iteration:', timelist)
+    print('iteration sum:', sum(timelist))
+    print('full trajectory generation time:', end - start)
+    # xlist = [x0]
+    # for i in range(sim_length):
+    # xlist.append(controller.MPCC.dynamics_single(xlist[-1], ulist[:, i, None], vlist[:, i, None], dt))
+
+    curve = np.array([path_position_func(i) for i in t])
+    ax.plot(curve[:, 0], curve[:, 1], curve[:, 2], color='g')
+    ani = animation.FuncAnimation(fig, draw_drone, frames=xlist, interval=200, repeat=True, init_func=draw_bg())
+    print(np.array2string(np.array(ulist), separator=", ", max_line_width=220))
+    print(np.array2string(np.array(xlist), separator=", "))
 
     plt.show()
 
@@ -212,5 +242,5 @@ def test_spline():
 
 
 if __name__ == '__main__':
-    test_planning_brate()
+    test_planning_incremental()
     #test_linarization()
