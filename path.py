@@ -57,7 +57,7 @@ class Spline_3D:
         self.spl_t = cp.interpolate.CubicSpline(points[:, 0], points[:, 1:], bc_type=bc_type)
         self.__find_arclength_par()
 
-    def __find_arclength_par(self, m: int = 60, e: float = 10**(-3), dt: float = 10**(-4)):
+    def __find_arclength_par(self, m: int = 30, e: float = 10**(-3), dt: float = 10**(-4)):
         """Class method that finds approximation of the arc length parametrisation of the time-parameterized spline
 
         :param m: Number of sections
